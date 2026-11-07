@@ -1,0 +1,106 @@
+name: Shunter
+description: Install a pinned shunt, execute a flowbook, and publish its report
+inputs:
+  version:
+    description: Exact four-part shunt release version
+    required: true
+  repository:
+    description: owner/repository containing the shunt release assets
+    required: true
+    default: getshunter/shunter
+  file:
+    description: Flowbook file, relative to the checkout
+    required: true
+  flow:
+    description: Flow ID or name (omit for the file default)
+    default: ''
+  variables:
+    description: One name=value variable per line
+    default: ''
+  report:
+    description: HTML report destination (JSON and Markdown sidecars use the same stem)
+    default: .shunter/report.html
+  artifact-name:
+    description: Optional HTML artifact basename (otherwise a unique name is generated)
+    default: ''
+outputs:
+  report-url:
+    description: GitHub artifact URL for the HTML report
+    value: ${{ steps.report.outputs.artifact-url }}
+  artifacts-url:
+    description: GitHub artifact URL for the collected project artifacts
+    value: ${{ steps.artifacts.outputs.artifact-url }}
+runs:
+  using: composite
+  steps:
+    - name: Restore shunt download cache
+      uses: actions/cache@v4
+      with:
+        path: ${{ runner.temp }}/shunter-action-cache
+        key: shunter-runner-v1-${{ runner.os }}-${{ runner.arch }}-${{ inputs.version }}
+    - name: Install shunt (Linux)
+      if: runner.os == 'Linux'
+      shell: bash
+      env:
+        SHUNTER_VERSION: ${{ inputs.version }}
+        SHUNTER_REPOSITORY: ${{ inputs.repository }}
+        SHUNTER_CACHE: ${{ runner.temp }}/shunter-action-cache
+      run: bash "$GITHUB_ACTION_PATH/install.sh" "$SHUNTER_VERSION"
+    - name: Install shunt (Windows)
+      if: runner.os == 'Windows'
+      shell: pwsh
+      env:
+        SHUNTER_VERSION: ${{ inputs.version }}
+        SHUNTER_REPOSITORY: ${{ inputs.repository }}
+        SHUNTER_CACHE: ${{ runner.temp }}/shunter-action-cache
+      run: '& "$env:GITHUB_ACTION_PATH/install.ps1" -Version $env:SHUNTER_VERSION'
+    - name: Run shunt
+      id: flow
+      shell: bash
+      env:
+        SHUNTER_FILE: ${{ inputs.file }}
+        SHUNTER_FLOW: ${{ inputs.flow }}
+        SHUNTER_VARIABLES: ${{ inputs.variables }}
+        SHUNTER_HTML_REPORT: ${{ inputs.report }}
+        SHUNTER_ARTIFACT_NAME: ${{ inputs.artifact-name }}
+      run: '"$SHUNTER_RUNTIME_PYTHON" "$GITHUB_ACTION_PATH/run.py"'
+    - name: Upload HTML report
+      id: report
+      if: always() && steps.flow.outputs.flow_upload != ''
+      uses: actions/upload-artifact@v7
+      with:
+        path: ${{ steps.flow.outputs.flow_upload }}
+        archive: false
+        if-no-files-found: warn
+        retention-days: 14
+    - name: Upload project artifacts
+      id: artifacts
+      if: always() && steps.flow.outputs.flow_artifacts != ''
+      uses: actions/upload-artifact@v7
+      with:
+        name: Shunter-Artifacts-${{ github.run_number }}-${{ github.run_attempt }}
+        path: ${{ steps.flow.outputs.flow_artifacts }}
+        include-hidden-files: true
+        if-no-files-found: warn
+        retention-days: 14
+    - name: Publish JUnit test results
+      id: tests
+      if: always() && !cancelled() && steps.flow.outputs.flow_junit_paths != '' && github.event.pull_request.head.repo.fork != true
+      uses: dorny/test-reporter@a43b3a5f7366b97d083190328d2c652e1a8b6aa2
+      with:
+        artifact: Shunter-Artifacts-${{ github.run_number }}-${{ github.run_attempt }}
+        name: Shunter unit tests
+        path: ${{ steps.flow.outputs.flow_junit_paths }}
+        reporter: java-junit
+        use-actions-summary: false
+        fail-on-error: false
+        fail-on-empty: false
+    - name: Publish Shunter summary
+      if: always() && steps.flow.outputs.flow_summary != ''
+      shell: bash
+      env:
+        SHUNTER_SUMMARY: ${{ steps.flow.outputs.flow_summary }}
+        SHUNTER_REPORT_URL: ${{ steps.report.outputs.artifact-url }}
+        SHUNTER_ARTIFACTS_URL: ${{ steps.artifacts.outputs.artifact-url }}
+        SHUNTER_TEST_RESULTS_URL: ${{ steps.tests.outputs.url_html }}
+      run: '"$SHUNTER_HOME/bin/shunt" --publish-summary "$SHUNTER_SUMMARY" --ci github'
